@@ -4,13 +4,176 @@
 
 The unofficial LineageOS 23.2 ROM reports a **generic Qualcomm IMEI** instead of the device's real IMEI. Some carriers reject devices with a generic IMEI, breaking cellular connectivity.
 
-## Root Cause
+## Root Cause: Oplus PCBA Verification Failure
 
-The ROM uses a **prebuilt kernel** extracted from stock OxygenOS (`android_device_oneplus_infiniti-kernel`). This prebuilt kernel's Image and DTB (Device Tree Blob) were built for OxygenOS's userspace. When running under LineageOS (different init sequences, SELinux policies, system properties), the modem subsystem doesn't properly initialize its IPC channels — causing the modem to fall back to a default/generic IMEI instead of reading the real one from NV storage.
+The IMEI issue is caused by **Oplus PCBA verification failing on custom ROMs** — not by the kernel source. The ROM developer [confirmed](https://xdaforums.com/t/rom-unofficial-lineageos-23-for-oneplus-15.4785437/) this:
 
-**All modem-critical kernel modules ARE present** in the prebuilt (qrtr, mhi, rmnet, etc.) — the issue is at the kernel Image/DTB level, not missing modules.
+> "The IMEI issue isn't related to Qualcomm source releases. It's actually due to Oplus PCBA verification failing on custom ROMs."
 
-## Fix
+OnePlus 13 (SM8750) running official LineageOS 23 does **not** have this issue — telephony, VoLTE, and WiFi Calling all work. Something changed in the SM8850 verification flow.
+
+### How PCBA Verification Works
+
+The verification chain, reconstructed from binary analysis of `libqti-radio-service.so` (loaded by `subsys_daemon`):
+
+```
+subsys_daemon starts (triggered by ro.boot.hardware=qcom)
+  → loads libqti-radio-service.so
+  → ModemConfig::LoadPcba()
+    → getPcbaFromReserve1()
+       reads raw PCBA data from /dev/block/by-name/oplusreserve1
+    → PcbaDeconfuse()
+       deobfuscates the PCBA data
+    → VerifyPcbaValid(reserve1_pcba_data*)
+       RSA signature verification (VerifyDataRawByPublicKey)
+    → if valid: extracts PCBA number, modem uses real IMEI from modemst1/modemst2
+    → if invalid: "VerifyPcbaValid failed!" → modem falls back to generic Qualcomm IMEI
+    → fallback: getPcbaFromNV6855() (reads PCBA from NV item 6855 if reserve1 fails)
+```
+
+The `subsys_daemon` service (`odm/bin/hw/subsys_daemon`) implements the `vendor.oplus.hardware.subsys_interface.subsys_radio` AIDL HAL. It runs as two instances:
+- `qti-modem-daemon-0` (SIM slot 0) — starts on `property:ro.boot.hardware=qcom`
+- `qti-modem-daemon-1` (SIM slot 1) — starts on DSDS config
+
+Both load `libqti-radio-service.so` via `-l /odm/lib64/libqti-radio-service.so`.
+
+### Key Strings from libqti-radio-service.so
+
+```
+"enter LoadPcba"
+"Load Pcba from reserve1"
+"getPcbaFromReserve1 failed, errno: %d. Try to get from NV6855"
+"PcbaDeconfuse args error"
+"VerifyPcbaValid failed!"
+"pcba:  = %s"
+"pcba_len = %d"
+"pcba data is not same"                    ← reserve1 vs NV6855 mismatch
+"ue_imeisv_svn wrong"
+"receive cmd of getPcbaNumber"
+```
+
+Paths accessed by the library:
+- `/dev/block/by-name/oplusreserve1` (primary PCBA data source)
+- `/dev/block/bootdevice/by-name/oplusreserve1` (alternative path)
+- `/dev/block/by-name/opporeserve1` (legacy OPPO path)
+- `/mnt/vendor/oplusreserve/radio/exp_operator_switch.config`
+- `/mnt/vendor/oplusreserve/radio/rule_list.config`
+
+### SM8850 vs SM8750: What Changed
+
+Both OnePlus 13 (SM8750) and OnePlus 15 (SM8850) use the same PCBA verification architecture (`subsys_daemon` + `libqti-radio-service.so`). The differences that may explain why OP15 breaks:
+
+| Area | OnePlus 13 (SM8750, working) | OnePlus 15 (SM8850, broken) |
+|------|-----|-----|
+| `ro.vendor.oplus.radio.serialno` | Not set | Set from `ro.boot.serialno` in `init.oplus.rc:84` |
+| `ro.vendor.oplus.radio.carrier_detect_mode` | Not present | `1` (in `odm.prop`) |
+| `ro.telephony.default_network` | `33,33` | `26,26` |
+| `sys.oplus_ftm_mode` | Not present | `997` |
+| `persist.vendor.radio.mdccbsize` | `164` | Not present |
+| `persist.vendor.radio.poweron_opt` | `1` (in `system_ext.prop`) | Not present |
+| ODM VINTF (Oplus radio HALs) | Identical | Identical |
+| `init.oppo.reserve.rc` | Present | Present |
+| `subsys_daemon` + deps | Present | Present |
+| `soccp_firmware` fstab mount | Not present | Present (new firmware partition) |
+| RF license files | SM8750-specific | SM8850-specific (more licenses) |
+
+The new `ro.vendor.oplus.radio.serialno` property in SM8850 is the most significant change — the modem verification flow likely now requires the serial number to validate PCBA data, and if this chain breaks for any reason, the modem falls back to generic IMEI.
+
+### What Needs Investigation (On-Device)
+
+The fix requires answering these questions on a running LineageOS device:
+
+**1. Is `subsys_daemon` running?**
+```bash
+adb shell ps -A | grep -E "subsys_daemon|qti-modem-daemon"
+adb shell getprop init.svc.qti-modem-daemon-0
+adb shell getprop init.svc.qti-modem-daemon-1
+```
+If not running or crashed, check logcat for crash reason — likely a missing dependency or SELinux denial.
+
+**2. Can it read oplusreserve1?**
+```bash
+adb shell ls -la /dev/block/by-name/oplusreserve1
+adb shell ls -la /dev/block/bootdevice/by-name/oplusreserve1
+```
+The SELinux policy in `hardware/oplus` labels these as `vendor_reserve_partition` and grants `subsystem_daemon` read access. Check for denials:
+```bash
+adb shell dmesg | grep "avc: denied" | grep -iE "subsystem_daemon\|reserve\|oplusreserve"
+```
+
+**3. Is oplusreserve2 mounted with the radio directory?**
+```bash
+adb shell mount | grep oplusreserve
+adb shell ls -la /mnt/vendor/oplusreserve/radio/
+```
+The `init.oppo.reserve.rc` creates `/mnt/vendor/oplusreserve/radio` (radio:system 0771) during `post-fs-data`. If this directory doesn't exist, the radio config files can't be read.
+
+**4. Are the Oplus radio HALs registered?**
+```bash
+adb shell lshal | grep -i oplus
+adb shell service list | grep -i oplus
+```
+Expected HALs (from `network_manifest_odm.xml`):
+- `vendor.oplus.hardware.appradioaidl` (OplusAppRadio0/1)
+- `vendor.oplus.hardware.ims` (OplusImsRadio0/1)
+- `vendor.oplus.hardware.radio` (OplusRadio0/1)
+- `vendor.oplus.hardware.subsys_interface.subsys_radio` (slot1/slot2)
+
+**5. Is the serial number propagated?**
+```bash
+adb shell getprop ro.boot.serialno
+adb shell getprop ro.vendor.oplus.radio.serialno
+```
+
+**6. Are RF licenses installed?**
+```bash
+adb shell ls -la /mnt/vendor/persist/data/pfm/licenses/
+```
+`init.network.rc` copies RF tuner and TDD-bypass licenses from `/odm/etc/` and `/vendor/etc/` to `/mnt/vendor/persist/data/pfm/licenses/` on boot. If these aren't present, the modem may not initialize properly.
+
+**7. Is oplus_mdmfeature loaded?**
+```bash
+adb shell lsmod | grep mdmfeature
+adb shell cat /proc/oplusManifest/network_manifest
+```
+
+**8. The actual IMEI test:**
+```bash
+adb shell service call iphonesubinfo 1
+```
+
+### Likely Fix Approaches (Ranked)
+
+**1. Ensure `subsys_daemon` runs and completes PCBA verification** — the most likely issue is that this service either doesn't start, crashes, or gets blocked by SELinux on LineageOS. The SELinux policy in `hardware/oplus/sepolicy/qti/vendor/subsystem_daemon.te` grants the necessary permissions (`vendor_reserve_partition:blk_file r_file_perms`, `qipcrtr_socket create_socket_perms_no_ioctl`), but the file_contexts must match the actual device paths for SM8850.
+
+**2. Verify `oplusreserve1` is intact** — the PCBA data lives on the `oplusreserve1` raw block partition. This is NOT wiped during normal ROM flashing (it's a separate partition, not part of super/userdata). But if someone ran a full erase or used MSM tool, the PCBA data may be gone.
+
+**3. Check RF license installation** — `init.network.rc` copies multiple platform-specific license files (`*.pfm`) to persist. SM8850 has new license files not present on SM8750. If these fail to copy (SELinux, missing source files), the modem may not initialize.
+
+**4. Property-level fix** — ensure `ro.vendor.oplus.radio.serialno` is correctly set from the bootloader. If `ro.boot.serialno` is empty or wrong on custom ROMs, inject it from another source.
+
+**5. Stub the PCBA verification (last resort)** — if the RSA verification in `VerifyPcbaValid()` fails for reasons that can't be fixed at the ROM level (e.g., changed public key in newer firmware), a stub in `libqti-radio-service.so` would be needed. This is extremely invasive and should be avoided.
+
+### Key Files and Services
+
+| File | Role |
+|------|------|
+| `odm/bin/hw/subsys_daemon` | Implements `ISubsysRadio` HAL, loads PCBA verification library |
+| `odm/lib64/libqti-radio-service.so` | Contains `ModemConfig::LoadPcba()`, `VerifyPcbaValid()`, PCBA read/verify logic |
+| `odm/lib64/libradio-service.so` | Radio service with `writeEncryptedSerialId`, `setImeiSvn`, `setMdmFeature` |
+| `odm/lib64/libradioapis.so` | QMI vendor service client: `radioVerifyIdl`, `radioSetMdmFeature` |
+| `odm/bin/commcenterd` | Communication center daemon, implements `ICommCenter` HAL |
+| `odm/etc/init/subsys_daemon.rc` | Service definitions for `qti-modem-daemon-0/1` |
+| `odm/etc/init/init.oppo.reserve.rc` | Creates `/mnt/vendor/oplusreserve/radio` directory |
+| `odm/etc/init/init.network.rc` | Copies RF license files to persist, modem diag logging |
+| `hardware/oplus/sepolicy/qti/vendor/subsystem_daemon.te` | SELinux policy for subsys_daemon |
+| `hardware/oplus/sepolicy/qti/vendor/file_contexts` | Labels oplusreserve partitions as `vendor_reserve_partition` |
+
+---
+
+## OSS Kernel Source (Fixes DT2W, Not IMEI)
+
+Switching to an OSS source-built kernel fixes **DT2W (Double Tap to Wake)** and other kernel-level features, but does **not** fix the IMEI issue. The kernel patches below are still needed as a separate fix.
 
 OnePlus has released GPL kernel sources for SM8850:
 
@@ -110,10 +273,20 @@ grep "OPLUS\|oplus" patches/kernel_source_files/canoe_GKI.config > kernel/oneplu
 
 ## Verification (After Build & Flash)
 
+### IMEI / PCBA Verification
 ```bash
 # Check real IMEI (should NOT be generic Qualcomm)
 adb shell service call iphonesubinfo 1
 
+# Check PCBA verification chain
+adb shell getprop init.svc.qti-modem-daemon-0    # should be "running"
+adb shell getprop ro.vendor.oplus.radio.serialno  # should be non-empty
+adb shell ls /mnt/vendor/oplusreserve/radio/       # should exist
+adb shell dmesg | grep "avc: denied" | grep -iE "subsystem_daemon|reserve|radio"
+```
+
+### Kernel / Modem
+```bash
 # Check baseband version (should be non-empty)
 adb shell getprop gsm.version.baseband
 
@@ -186,5 +359,6 @@ CLO drops for new SoCs typically lag months behind device launch. SM8850/canoe h
 
 - The `modules.vendor_blocklist.msm.canoe` already exists in the OSS kernel source at `modules-lists/` — it just needs to be copied to the root or the BoardConfig path updated.
 - The `gki_defconfig` comes from the `android_kernel_common_oneplus_sm8850` repo, which provides the GKI base config.
-- Switching to OSS kernel should also fix DT2W (Double Tap to Wake) and touch gestures, which are broken with the prebuilt kernel.
+- Switching to OSS kernel fixes DT2W (Double Tap to Wake) and touch gestures, which are broken with the prebuilt kernel. It does **not** fix the IMEI issue (see PCBA Verification section above).
 - Vendor blobs are from `CPH2745_16.0.5.700(EX01)`. Kernel source branch is `sm8850_b_16.0.0_oneplus_15`. If there's an ABI mismatch, vendor blobs may need to be re-extracted from a firmware version matching the kernel source.
+- The PCBA verification happens entirely in userspace (`libqti-radio-service.so`), not in TrustZone or modem firmware — this means it is fixable from the ROM side without modifying the modem image.
