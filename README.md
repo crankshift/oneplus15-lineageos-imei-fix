@@ -179,7 +179,6 @@ CLO drops for new SoCs typically lag months behind device launch. SM8850/canoe h
 | Modem/IMEI fix | Likely but unverified | Expected to work out of the box |
 | OPlus driver conflicts | Possible | None |
 | Long-term maintainability | Poor — tied to one firmware snapshot | Good — rebases onto CLO updates |
-| Available now | Yes | No — waiting on Qualcomm |
 
 **Bottom line:** This fix is a best-effort approach using what's available today. It addresses the device tree configuration issues (platform naming, module lists, kernel toggle) which are needed regardless of kernel source. The kernel itself may or may not build and boot cleanly — the OnePlusOSS dump wasn't designed for this use case. Once CLO publishes the canoe platform, the device tree patches from this repo will still apply, but the kernel source files (`canoe_GKI.config`, module lists) should be regenerated from CLO's proper Kconfig.
 
