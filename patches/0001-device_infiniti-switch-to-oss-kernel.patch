@@ -1,0 +1,13 @@
+diff --git a/BoardConfig.mk b/BoardConfig.mk
+index 440c336..ce25621 100644
+--- a/BoardConfig.mk
++++ b/BoardConfig.mk
+@@ -4,7 +4,7 @@
+ # SPDX-License-Identifier: Apache-2.0
+ #
+ 
+-USE_PREBUILT_KERNEL ?= true
++USE_PREBUILT_KERNEL ?= false
+ 
+ # Partitions
+ BOARD_SUPER_PARTITION_SIZE := 17062428672

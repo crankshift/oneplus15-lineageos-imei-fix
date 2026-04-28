@@ -1,0 +1,7 @@
+kernel/
+kernel_modules/
+kernel_common/
+kernel_prebuilt/
+device_common/
+device_infiniti/
+vendor_infiniti/
