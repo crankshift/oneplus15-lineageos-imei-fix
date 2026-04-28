@@ -131,6 +131,19 @@ adb shell dmesg | grep -iE "pil|modem|mhi|qrtr"
 adb shell dmesg | grep "avc: denied" | grep -iE "rild|radio|modem|qmi"
 ```
 
+## Repositories Used
+
+**OSS Kernel Sources (OnePlusOSS):**
+- [android_kernel_oneplus_sm8850](https://github.com/OnePlusOSS/android_kernel_oneplus_sm8850) — branch `oneplus/sm8850_b_16.0.0_oneplus_15` — main kernel source, defconfigs, Bazel configs (`configs/canoe_perf.bzl`), combined module lists
+- [android_kernel_modules_and_devicetree_oneplus_sm8850](https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8850) — external kernel modules (Qualcomm + OPlus), device trees, OPlus module boot list
+- [android_kernel_common_oneplus_sm8850](https://github.com/OnePlusOSS/android_kernel_common_oneplus_sm8850) — GKI common kernel, provides `gki_defconfig`
+
+**Device Tree & Vendor (OnePlus-SM8850-Development):**
+- [android_device_oneplus_sm8850-common](https://github.com/OnePlus-SM8850-Development/android_device_oneplus_sm8850-common) — branch `lineage-23.2` — shared BoardConfig, kernel build config, module lists
+- [android_device_oneplus_infiniti](https://github.com/OnePlus-SM8850-Development/android_device_oneplus_infiniti) — branch `lineage-23.2` — device-specific BoardConfig with `USE_PREBUILT_KERNEL` toggle
+- [android_device_oneplus_infiniti-kernel](https://github.com/OnePlus-SM8850-Development/android_device_oneplus_infiniti-kernel) — branch `lineage-23.2` — current prebuilt kernel (used as reference for partition-specific module lists)
+- [proprietary_vendor_oneplus_infiniti](https://github.com/OnePlus-SM8850-Development/proprietary_vendor_oneplus_infiniti) — branch `lineage-23.2` — vendor blobs from `CPH2745_16.0.5.700(EX01)`
+
 ## Notes
 
 - The `modules.vendor_blocklist.msm.canoe` already exists in the OSS kernel source at `modules-lists/` — it just needs to be copied to the root or the BoardConfig path updated.
