@@ -144,6 +144,45 @@ adb shell dmesg | grep "avc: denied" | grep -iE "rild|radio|modem|qmi"
 - [android_device_oneplus_infiniti-kernel](https://github.com/OnePlus-SM8850-Development/android_device_oneplus_infiniti-kernel) — branch `lineage-23.2` — current prebuilt kernel (used as reference for partition-specific module lists)
 - [proprietary_vendor_oneplus_infiniti](https://github.com/OnePlus-SM8850-Development/proprietary_vendor_oneplus_infiniti) — branch `lineage-23.2` — vendor blobs from `CPH2745_16.0.5.700(EX01)`
 
+## OnePlusOSS Kernel vs CLO (CodeLinaro) Kernel
+
+This fix uses **OnePlus's GPL kernel dump** — not Qualcomm's official **CLO (CodeLinaro) platform release** for SM8850/canoe. These are fundamentally different kernel sources with different stability expectations.
+
+### What we're using: OnePlusOSS GPL dump
+
+OnePlus publishes kernel source to comply with GPL. These sources are:
+
+- **Built for OxygenOS**, not AOSP — init sequences, property namespaces, and SELinux contexts assume OxygenOS userspace
+- **Bazel/Kleaf build system** — uses `.bzl` config files instead of standard Kconfig. We had to convert `configs/canoe_perf.bzl` to a traditional `CONFIG_*=` format (`canoe_GKI.config`) because the LineageOS build system doesn't speak Bazel
+- **Version-pinned to a specific firmware** — kernel branch is `sm8850_b_16.0.0` but current vendor blobs are from firmware `16.0.5.700`. If Qualcomm changed the KMI (Kernel Module Interface) between these versions, vendor `.ko` modules won't load
+- **OPlus-heavy** — includes OPlus-specific drivers, configs, and device tree modifications that may conflict with or duplicate what LineageOS provides
+- **Not tested against AOSP** — OnePlus tests against their own ROM, not against GKI compliance or AOSP boot flows
+
+### What the ROM devs are waiting for: CLO platform drop
+
+Qualcomm publishes official AOSP-compatible kernel platforms through [CodeLinaro](https://git.codelinaro.org/). For each SoC, CLO provides:
+
+- **AOSP-native kernel** — designed and tested against AOSP init, SELinux, and property conventions. Works with GKI out of the box
+- **Stable KMI** — guaranteed kernel module interface compatibility with vendor blobs. No ABI mismatch risk
+- **Standard Kconfig** — proper `defconfig` files, no Bazel conversion needed
+- **Clean modem/DSP drivers** — PIL, QRTR, QMI, and remoteproc drivers configured for AOSP userspace IPC, not vendor-specific paths
+- **Tested device trees** — DTBs with correct memory maps, firmware paths, and peripheral configurations for AOSP boot flow
+
+CLO drops for new SoCs typically lag months behind device launch. SM8850/canoe hasn't been published yet — that's what the devs are waiting for.
+
+### Stability assessment
+
+| | OnePlusOSS (this fix) | CLO (future) |
+|---|---|---|
+| Build complexity | High — Bazel→Kconfig conversion, missing files | Low — standard AOSP kernel build |
+| ABI risk | **Medium-High** — kernel `16.0.0` vs blobs `16.0.5` | None — matched by Qualcomm |
+| Modem/IMEI fix | Likely but unverified | Expected to work out of the box |
+| OPlus driver conflicts | Possible | None |
+| Long-term maintainability | Poor — tied to one firmware snapshot | Good — rebases onto CLO updates |
+| Available now | Yes | No — waiting on Qualcomm |
+
+**Bottom line:** This fix is a best-effort approach using what's available today. It addresses the device tree configuration issues (platform naming, module lists, kernel toggle) which are needed regardless of kernel source. The kernel itself may or may not build and boot cleanly — the OnePlusOSS dump wasn't designed for this use case. Once CLO publishes the canoe platform, the device tree patches from this repo will still apply, but the kernel source files (`canoe_GKI.config`, module lists) should be regenerated from CLO's proper Kconfig.
+
 ## Notes
 
 - The `modules.vendor_blocklist.msm.canoe` already exists in the OSS kernel source at `modules-lists/` — it just needs to be copied to the root or the BoardConfig path updated.
